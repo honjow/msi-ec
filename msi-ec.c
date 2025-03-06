@@ -4719,12 +4719,38 @@ static umode_t msi_ec_hwmon_is_visible(const void *data, enum hwmon_sensor_types
 		    ((channel == 0 && conf.cpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP) ||
 		     (channel == 1 && conf.gpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP)))
 			return 0444;
+		else if (attr == hwmon_fan_label &&
+			 ((channel == 0 && conf.cpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP) ||
+			  (channel == 1 && conf.gpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP)))
+			return 0444;
 		break;
 	default:
 		break;
 	}
 	
 	return 0;
+}
+
+static int msi_ec_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
+                                   u32 attr, int channel, const char **str)
+{
+    switch (type) {
+    case hwmon_fan:
+        if (attr == hwmon_fan_label) {
+            if (channel == 0) {
+                *str = "cpu_fan";
+                return 0;
+            } else if (channel == 1) {
+                *str = "gpu_fan";
+                return 0;
+            }
+        }
+        break;
+    default:
+        break;
+    }
+    
+    return -EINVAL;
 }
 
 static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
@@ -4810,6 +4836,7 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 static const struct hwmon_ops msi_ec_hwmon_ops = {
 	.is_visible = msi_ec_hwmon_is_visible,
 	.read = msi_ec_hwmon_read,
+	.read_string = msi_ec_hwmon_read_string,
 };
 
 static const struct hwmon_channel_info *msi_ec_hwmon_info[] = {
@@ -4817,8 +4844,8 @@ static const struct hwmon_channel_info *msi_ec_hwmon_info[] = {
                   HWMON_T_INPUT,  // CPU temperature
                   HWMON_T_INPUT), // GPU temperature
 	HWMON_CHANNEL_INFO(fan,
-                  HWMON_F_INPUT,  // CPU fan
-                  HWMON_F_INPUT), // GPU fan
+                  HWMON_F_INPUT | HWMON_F_LABEL,  // CPU fan
+                  HWMON_F_INPUT | HWMON_F_LABEL), // GPU fan
 	NULL
 };
 
