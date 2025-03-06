@@ -4704,6 +4704,23 @@ static int __init load_configuration(void)
 // Hwmon functions
 // ============================================================ //
 
+static ssize_t pwm_enable_available_show(struct device *dev, struct device_attribute *attr, char *buf);
+
+static DEVICE_ATTR_RO(pwm_enable_available);
+
+// Check if a specific fan mode is available in the configuration
+static bool fan_mode_is_available(const char *mode)
+{
+    int i;
+    
+    for (i = 0; i < ARRAY_SIZE(conf.fan_mode.modes); i++) {
+        if (strcmp(conf.fan_mode.modes[i].name, mode) == 0)
+            return true;
+    }
+    
+    return false;
+}
+
 static umode_t msi_ec_hwmon_is_visible(const void *data, enum hwmon_sensor_types type,
                                        u32 attr, int channel)
 {
@@ -4724,11 +4741,119 @@ static umode_t msi_ec_hwmon_is_visible(const void *data, enum hwmon_sensor_types
 			  (channel == 1 && conf.gpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP)))
 			return 0444;
 		break;
+	case hwmon_pwm:
+		if (attr == hwmon_pwm_enable &&
+		    ((channel == 0 && conf.cpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP) ||
+		     (channel == 1 && conf.gpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP)))
+			return 0644;
+		break;
 	default:
 		break;
 	}
 	
 	return 0;
+}
+
+// Helper function to set fan mode using mode name
+static int set_fan_mode(const char *mode)
+{
+    int result;
+
+    for (int i = 0; i < ARRAY_SIZE(conf.fan_mode.modes); i++) {
+        // NULL entries have NULL name
+        if (conf.fan_mode.modes[i].name && 
+            strcmp(conf.fan_mode.modes[i].name, mode) == 0) {
+            
+            result = curve_fan_mode_change(mode);
+            if (result < 0)
+                return result;
+
+            result = ec_write(conf.fan_mode.address,
+                              conf.fan_mode.modes[i].value);
+            if (result < 0)
+                return result;
+
+            return 0;
+        }
+    }
+    
+    return -EINVAL; // Invalid mode
+}
+
+// Helper function to set cooler boost mode
+static int set_cooler_boost(bool enable)
+{
+    int result;
+    
+    if (conf.cooler_boost.address == MSI_EC_ADDR_UNSUPP)
+        return -EINVAL;
+    
+    result = ec_set_bit(conf.cooler_boost.address, conf.cooler_boost.bit, enable);
+    if (result < 0)
+        return result;
+
+    return 0;
+}
+
+static int msi_ec_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
+                             u32 attr, int channel, long val)
+{
+    int result = 0;
+    
+    switch (type) {
+    case hwmon_fan:
+		break;
+	case hwmon_pwm:
+        if (attr == hwmon_pwm_enable) {
+            if (channel == 0 || channel == 1) { // CPU and GPU fans share mode control
+                // Change fan mode based on val
+                switch (val) {
+                case 1: // Manual mode - Advanced
+                    result = set_cooler_boost(false);
+                    if (fan_mode_is_available(FM_ADVANCED_NAME))
+                        result = set_fan_mode(FM_ADVANCED_NAME);
+                    else
+                        return -EINVAL;
+                    break;
+                case 2: // Automatic mode - Auto
+                    result = set_cooler_boost(false);
+                    if (fan_mode_is_available(FM_AUTO_NAME))
+                        result = set_fan_mode(FM_AUTO_NAME);
+                    else
+                        return -EINVAL;
+                    break;
+                case 3: // Full speed mode - Cooler Boost
+                    if (conf.cooler_boost.address != MSI_EC_ADDR_UNSUPP)
+                        result = set_cooler_boost(true);
+                    else
+                        return -EINVAL;
+                    break;
+                case 4: // Silent mode
+                    result = set_cooler_boost(false);
+                    if (fan_mode_is_available(FM_SILENT_NAME))
+                        result = set_fan_mode(FM_SILENT_NAME);
+                    else
+                        return -EINVAL;
+                    break;
+                case 5: // Basic mode
+                    result = set_cooler_boost(false);
+                    if (fan_mode_is_available(FM_BASIC_NAME))
+                        result = set_fan_mode(FM_BASIC_NAME);
+                    else
+                        return -EINVAL;
+                    break;
+                default:
+                    return -EINVAL;
+                }
+            }
+            return result;
+        }
+        break;
+    default:
+        break;
+    }
+    
+    return -EINVAL;
 }
 
 static int msi_ec_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
@@ -4799,7 +4924,7 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 				if (fan_value == 0)
 					*val = 0;
 				else
-					*val = 478000 / fan_value; // Apply formula RPM = 478000 / value
+					*val = 480000 / fan_value; // Apply formula RPM = 480000 / value
 				
 				return 0;
 			} else if (channel == 1) { // GPU fan
@@ -4820,9 +4945,44 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 				if (fan_value == 0)
 					*val = 0;
 				else
-					*val = 478000 / fan_value; // Apply formula RPM = 478000 / value
+					*val = 480000 / fan_value; // Apply formula RPM = 480000 / value
 				
 				return 0;
+			}
+		}
+		break;
+	case hwmon_pwm:
+		if (attr == hwmon_pwm_enable) {
+			// CPU and GPU fans share mode control, so return the same value for both channels
+    		if (channel == 0 || channel == 1) {
+				int result;
+				bool cooler_boost_enabled = false;
+				const char *mode_name = NULL;
+    		    if (conf.cooler_boost.address != MSI_EC_ADDR_UNSUPP) {
+					result = ec_check_bit(conf.cooler_boost.address, conf.cooler_boost.bit, &cooler_boost_enabled);
+					if (result < 0)
+						return result;
+				}
+    		    if (cooler_boost_enabled) {
+					*val = 3; // Full speed mode
+					return 0;
+				} else {
+					result = fan_mode_get(&mode_name);
+					if (result < 0)
+						return result;
+					
+					if (strcmp(mode_name, FM_ADVANCED_NAME) == 0)
+						*val = 1; // Manual mode
+					else if (strcmp(mode_name, FM_AUTO_NAME) == 0)
+						*val = 2; // Automatic mode
+					else if (strcmp(mode_name, FM_SILENT_NAME) == 0)
+						*val = 4; // Silent mode
+					else if (strcmp(mode_name, FM_BASIC_NAME) == 0)
+						*val = 5; // Basic mode
+					else
+						*val = 0; // Unknown mode
+					return 0;
+				}
 			}
 		}
 		break;
@@ -4833,10 +4993,44 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 	return -EOPNOTSUPP;
 }
 
+static ssize_t pwm_enable_available_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    int len = 0;
+    const char *mode_names[6] = {NULL}; // Index corresponds to mode value, 0 is not used
+    
+    // First collect all mode names
+    for (int i = 0; conf.fan_mode.modes[i].name; i++) {
+        if (strcmp(conf.fan_mode.modes[i].name, FM_ADVANCED_NAME) == 0)
+            mode_names[1] = conf.fan_mode.modes[i].name;  // Manual mode
+        else if (strcmp(conf.fan_mode.modes[i].name, FM_AUTO_NAME) == 0)
+            mode_names[2] = conf.fan_mode.modes[i].name;  // Auto mode
+        else if (strcmp(conf.fan_mode.modes[i].name, FM_SILENT_NAME) == 0)
+            mode_names[4] = conf.fan_mode.modes[i].name;  // Silent mode
+        else if (strcmp(conf.fan_mode.modes[i].name, FM_BASIC_NAME) == 0)
+            mode_names[5] = conf.fan_mode.modes[i].name;  // Basic mode
+    }
+    
+    // Add Cooler Boost (if supported)
+    if (conf.cooler_boost.address != MSI_EC_ADDR_UNSUPP) {
+        mode_names[3] = "full";
+    }
+    
+    // Output in order
+    for (int i = 1; i <= 5; i++) {
+        if (mode_names[i]) {
+            len += scnprintf(buf + len, PAGE_SIZE - len, 
+                          "%d: %s\n", i, mode_names[i]);
+        }
+    }
+    
+    return len;
+}
+
 static const struct hwmon_ops msi_ec_hwmon_ops = {
 	.is_visible = msi_ec_hwmon_is_visible,
 	.read = msi_ec_hwmon_read,
 	.read_string = msi_ec_hwmon_read_string,
+	.write = msi_ec_hwmon_write,
 };
 
 static const struct hwmon_channel_info *msi_ec_hwmon_info[] = {
@@ -4844,14 +5038,31 @@ static const struct hwmon_channel_info *msi_ec_hwmon_info[] = {
                   HWMON_T_INPUT,  // CPU temperature
                   HWMON_T_INPUT), // GPU temperature
 	HWMON_CHANNEL_INFO(fan,
-                  HWMON_F_INPUT | HWMON_F_LABEL,  // CPU fan
-                  HWMON_F_INPUT | HWMON_F_LABEL), // GPU fan
+				HWMON_F_INPUT | HWMON_F_LABEL,  // CPU fan
+				HWMON_F_INPUT | HWMON_F_LABEL), // GPU fan
+	HWMON_CHANNEL_INFO(pwm,
+				HWMON_PWM_ENABLE,  // CPU fan PWM
+				HWMON_PWM_ENABLE), // GPU fan PWM
 	NULL
 };
 
 static const struct hwmon_chip_info msi_ec_hwmon_chip_info = {
 	.ops = &msi_ec_hwmon_ops,
 	.info = msi_ec_hwmon_info,
+};
+
+static struct attribute *msi_ec_hwmon_attrs[] = {
+    &dev_attr_pwm_enable_available.attr,
+    NULL
+};
+
+static const struct attribute_group msi_ec_hwmon_group = {
+    .attrs = msi_ec_hwmon_attrs,
+};
+
+static const struct attribute_group *msi_ec_hwmon_groups[] = {
+    &msi_ec_hwmon_group,
+    NULL
 };
 
 static int __init msi_ec_init(void)
@@ -4899,22 +5110,29 @@ static int __init msi_ec_init(void)
 		led_classdev_register(&msi_platform_device->dev,
 				      &msiacpi_led_kbdlight);
 
+	pr_info("msi-ec: Registering hwmon device\n");
+
 	// register hwmon device
 	hwmon_data = devm_kzalloc(&msi_platform_device->dev, sizeof(*hwmon_data), GFP_KERNEL);
 	if (!hwmon_data)
 		return -ENOMEM;
 	
 	hwmon_data->dev = &msi_platform_device->dev;
-	hwmon_data->name = "msi_ec";
+	hwmon_data->name = MSI_EC_DRIVER_NAME;
 	
 	dev_set_drvdata(&msi_platform_device->dev, hwmon_data);
 	
 	hwmon_dev = hwmon_device_register_with_info(&msi_platform_device->dev,
 						      hwmon_data->name, hwmon_data,
-						      &msi_ec_hwmon_chip_info, NULL);
+						      &msi_ec_hwmon_chip_info, 
+						      msi_ec_hwmon_groups);
 	
-	if (IS_ERR(hwmon_dev))
-		return PTR_ERR(hwmon_dev);
+	if (IS_ERR(hwmon_dev)) {
+		int err = PTR_ERR(hwmon_dev);
+		pr_err("msi-ec: hwmon device register failed with error %d\n", err);
+		return err;
+	}
+	pr_info("msi-ec: hwmon device registered successfully\n");
 
 	return 0;
 }
