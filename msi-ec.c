@@ -2933,10 +2933,22 @@ static struct msi_ec_conf CONF401 __initdata = {
 	.cpu = {
 		.rt_temp_address       = 0x68,
 		.rt_fan_speed_address  = 0x71,
+		.fan_curve = {
+			.speed_start_address = 0x72,
+			.temperature_start_address = 0x6a,
+			.entries_count = 7,
+			.apply_strategy = CURVE_APPLY_STRATEGY_NORMAL
+		}
 	},
 	.gpu = {
 		.rt_temp_address      = 0x80,
 		.rt_fan_speed_address = 0x89,
+		.fan_curve = {
+			.speed_start_address = 0x8a,
+			.temperature_start_address = 0x82,
+			.entries_count = 7,
+			.apply_strategy = CURVE_APPLY_STRATEGY_NORMAL
+		}
 	},
 	.leds = {
 		.micmute_led_address = MSI_EC_ADDR_UNSUPP,
