@@ -4804,11 +4804,6 @@ static int msi_platform_remove(struct platform_device *pdev)
 {
 	if (debug)
 		sysfs_remove_group(&pdev->dev.kobj, &msi_debug_group);
-	
-	// // Remove fan curve attributes
-    // if (hwmon_dev) {
-    //     remove_fan_curve_attrs(hwmon_dev);
-    // }
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0))
 	return 0;
@@ -4962,8 +4957,12 @@ static ssize_t curve_attr_show(struct device *dev,
 		pr_debug("msi-ec: Failed to read EC value from address: 0x%04x\n", address);
 		return ret;
 	}
-	pr_debug("msi-ec: Read EC value from address: 0x%04x, value: %u\n", address, value);
-    
+
+	unsigned int orig_val = value;
+	value = value * 255 / 100;
+
+	pr_debug("msi-ec: Reading PWM from address: 0x%04x, scaled value: %u (from %u)\n", 
+			 address, value, orig_val);
     return sysfs_emit(buf, "%u\n", value);
 }
 
@@ -5004,9 +5003,13 @@ static ssize_t curve_attr_store(struct device *dev,
             // Validate PWM value (0-255)
             if (val > 255)
                 return -EINVAL;
+
+			unsigned long orig_val = val;
+			val = val * 100 / 255;
             
             address = conf.cpu.fan_curve.speed_start_address + (point - 1);
-			pr_debug("msi-ec: Writing CPU PWM to address: 0x%04x, value: %lu\n", address, val);
+			pr_debug("msi-ec: Writing CPU PWM to address: 0x%04x, scaled value: %lu (from %lu)\n", 
+				address, val, orig_val);
         } else {
             // Last point has no temperature value
             if (point < 1 || point >= conf.cpu.fan_curve.entries_count) {
@@ -5030,8 +5033,13 @@ static ssize_t curve_attr_store(struct device *dev,
                 
             if (val > 255)
                 return -EINVAL;
+			
+			unsigned long orig_val = val;
+			val = val * 100 / 255;
                 
             address = conf.gpu.fan_curve.speed_start_address + (point - 1);
+			pr_debug("msi-ec: Writing GPU PWM to address: 0x%04x, scaled value: %lu (from %lu)\n", 
+					address, val, orig_val);
         } else {
             if (point < 1 || point >= conf.gpu.fan_curve.entries_count)
                 return -EINVAL;
@@ -5040,6 +5048,7 @@ static ssize_t curve_attr_store(struct device *dev,
                 return -EINVAL;
                 
             address = conf.gpu.fan_curve.temperature_start_address + (point - 1);
+			pr_debug("msi-ec: Writing GPU temperature to address: 0x%04x, value: %lu\n", address, val);
         }
     }
     
@@ -5202,7 +5211,7 @@ cleanup:
     for (i = 0; i < idx; i++) {
 		if (curve_attrs[i].dev_attr.attr.name) {
 			kfree(curve_attrs[i].dev_attr.attr.name);
-			device_remove_file(dev, &curve_attrs[i].dev_attr);
+			// device_remove_file(dev, &curve_attrs[i].dev_attr);
 		}
     }
     kfree(curve_attrs);
@@ -5217,16 +5226,16 @@ static void remove_fan_curve_attrs(struct device *dev)
     int i;
 
 	if (!dev) {
-        pr_err("msi-ec: Cannot remove attributes, device pointer is NULL\n");
+        pr_debug("msi-ec: Cannot remove attributes, device pointer is NULL\n");
         return;
     }
 
 	if (!curve_attrs) {
-        pr_info("msi-ec: No fan curve attributes to remove\n");
+        pr_debug("msi-ec: No fan curve attributes to remove\n");
         return;
     }
     
-    pr_info("msi-ec: Removing %d fan curve attributes\n", curve_attrs_count);
+    pr_debug("msi-ec: Removing %d fan curve attributes\n", curve_attrs_count);
     for (i = 0; i < curve_attrs_count; i++) {
         if (curve_attrs[i].dev_attr.attr.name) {
             // device_remove_file(dev, &curve_attrs[i].dev_attr);
@@ -5236,7 +5245,7 @@ static void remove_fan_curve_attrs(struct device *dev)
     kfree(curve_attrs);
     curve_attrs = NULL;
     curve_attrs_count = 0;
-	pr_info("msi-ec: Successfully removed all fan curve attributes\n");
+	pr_debug("msi-ec: Successfully removed all fan curve attributes\n");
 }
 
 // ============================================================ //
