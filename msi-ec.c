@@ -4872,6 +4872,14 @@ static int __init load_configuration(void)
 // Hwmon functions (curve)
 // ============================================================ //
 
+enum {
+	PWM_ENABLE_FULL = 0,
+	PWM_ENABLE_MANUAL,
+	PWM_ENABLE_AUTO,
+	PWM_ENABLE_SILENT,
+	PWM_ENABLE_BASIC,
+};
+
 static int virtual_hwmon_pwm_enable[2] = {-1, -1};
 
 // Array to hold dynamically created attributes
@@ -5246,6 +5254,7 @@ static void remove_fan_curve_attrs(struct device *dev)
 // ============================================================ //
 // Hwmon functions (other)
 // ============================================================ //
+
 // Check if a specific fan mode is available in the configuration
 static bool fan_mode_is_available(const char *mode)
 {
@@ -5348,50 +5357,51 @@ static int msi_ec_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 				virtual_hwmon_pwm_enable[channel] = val;
 
                 switch (val) {
-                case 1: // Manual mode - Advanced
+                case PWM_ENABLE_FULL: // Full speed mode - Cooler Boost
+                    if (conf.cooler_boost.address != MSI_EC_ADDR_UNSUPP)
+                        result = set_cooler_boost(true);
+                    else
+                        return -EINVAL;
+					virtual_hwmon_pwm_enable[0] = PWM_ENABLE_FULL;
+					virtual_hwmon_pwm_enable[1] = PWM_ENABLE_FULL;
+                    break;
+                case PWM_ENABLE_MANUAL: // Manual mode - Advanced
                     result = set_cooler_boost(false);
                     if (fan_mode_is_available(FM_ADVANCED_NAME))
                         result = set_fan_mode(FM_ADVANCED_NAME);
                     else
                         return -EINVAL;
-					virtual_hwmon_pwm_enable[1] = 1;
-					virtual_hwmon_pwm_enable[0] = 1;
+					virtual_hwmon_pwm_enable[1] = PWM_ENABLE_MANUAL;
+					virtual_hwmon_pwm_enable[0] = PWM_ENABLE_MANUAL;
                     break;
-                case 2: // Automatic mode - Auto
+                case PWM_ENABLE_AUTO: // Automatic mode - Auto
                     result = set_cooler_boost(false);
 					// If both channels are set to automatic mode, apply the change
-					if (virtual_hwmon_pwm_enable[1] == 2 && virtual_hwmon_pwm_enable[0] ==2) {
+					if (virtual_hwmon_pwm_enable[1] == PWM_ENABLE_AUTO && 
+					    virtual_hwmon_pwm_enable[0] == PWM_ENABLE_AUTO) {
 						if (fan_mode_is_available(FM_AUTO_NAME))
 						    result = set_fan_mode(FM_AUTO_NAME);
 						else
 						    return -EINVAL;
 					}
                     break;
-                case 3: // Full speed mode - Cooler Boost
-                    if (conf.cooler_boost.address != MSI_EC_ADDR_UNSUPP)
-                        result = set_cooler_boost(true);
-                    else
-                        return -EINVAL;
-					virtual_hwmon_pwm_enable[0] = 3;
-					virtual_hwmon_pwm_enable[1] = 3;
-                    break;
-                case 4: // Silent mode
+                case PWM_ENABLE_SILENT: // Silent mode
                     result = set_cooler_boost(false);
                     if (fan_mode_is_available(FM_SILENT_NAME))
                         result = set_fan_mode(FM_SILENT_NAME);
                     else
                         return -EINVAL;
-					virtual_hwmon_pwm_enable[0] = 4;
-					virtual_hwmon_pwm_enable[1] = 4;
+					virtual_hwmon_pwm_enable[0] = PWM_ENABLE_SILENT;
+					virtual_hwmon_pwm_enable[1] = PWM_ENABLE_SILENT;
                     break;
-                case 5: // Basic mode
+                case PWM_ENABLE_BASIC: // Basic mode
                     result = set_cooler_boost(false);
                     if (fan_mode_is_available(FM_BASIC_NAME))
                         result = set_fan_mode(FM_BASIC_NAME);
                     else
                         return -EINVAL;
-					virtual_hwmon_pwm_enable[0] = 5;
-					virtual_hwmon_pwm_enable[1] = 5;
+					virtual_hwmon_pwm_enable[0] = PWM_ENABLE_BASIC;
+					virtual_hwmon_pwm_enable[1] = PWM_ENABLE_BASIC;
                     break;
                 default:
                     return -EINVAL;
@@ -5520,9 +5530,9 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 						return result;
 				}
     		    if (cooler_boost_enabled) {
-					*val = 3; // Full speed mode
-					virtual_hwmon_pwm_enable[1] = 3;
-					virtual_hwmon_pwm_enable[0] = 3;
+					*val = PWM_ENABLE_FULL; // Full speed mode
+					virtual_hwmon_pwm_enable[1] = PWM_ENABLE_FULL;
+					virtual_hwmon_pwm_enable[0] = PWM_ENABLE_FULL;
 					return 0;
 				} else {
 					result = fan_mode_get(&mode_name);
@@ -5530,15 +5540,15 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 						return result;
 					
 					if (strcmp(mode_name, FM_ADVANCED_NAME) == 0)
-						*val = 1; // Manual mode
+						*val = PWM_ENABLE_MANUAL; // Manual mode
 					else if (strcmp(mode_name, FM_AUTO_NAME) == 0)
-						*val = 2; // Automatic mode
+						*val = PWM_ENABLE_AUTO; // Automatic mode
 					else if (strcmp(mode_name, FM_SILENT_NAME) == 0)
-						*val = 4; // Silent mode
+						*val = PWM_ENABLE_SILENT; // Silent mode
 					else if (strcmp(mode_name, FM_BASIC_NAME) == 0)
-						*val = 5; // Basic mode
+						*val = PWM_ENABLE_BASIC; // Basic mode
 					else
-						*val = 0; // Unknown mode
+						*val = -1; // Unknown mode
 					virtual_hwmon_pwm_enable[1] = *val;
 					virtual_hwmon_pwm_enable[0] = *val;
 					return 0;
@@ -5556,7 +5566,7 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 static ssize_t pwm_enable_available_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
     int len = 0;
-    const char *mode_names[6] = {NULL}; // Index corresponds to mode value, 0 is not used
+    const char *mode_names[5] = {NULL}; // Index corresponds to mode value, 0 is not used
     
     // First collect all mode names
     for (int i = 0; conf.fan_mode.modes[i].name; i++) {
@@ -5565,18 +5575,18 @@ static ssize_t pwm_enable_available_show(struct device *dev, struct device_attri
         else if (strcmp(conf.fan_mode.modes[i].name, FM_AUTO_NAME) == 0)
             mode_names[2] = conf.fan_mode.modes[i].name;  // Auto mode
         else if (strcmp(conf.fan_mode.modes[i].name, FM_SILENT_NAME) == 0)
-            mode_names[4] = conf.fan_mode.modes[i].name;  // Silent mode
+            mode_names[3] = conf.fan_mode.modes[i].name;  // Silent mode
         else if (strcmp(conf.fan_mode.modes[i].name, FM_BASIC_NAME) == 0)
-            mode_names[5] = conf.fan_mode.modes[i].name;  // Basic mode
+            mode_names[4] = conf.fan_mode.modes[i].name;  // Basic mode
     }
     
     // Add Cooler Boost (if supported)
     if (conf.cooler_boost.address != MSI_EC_ADDR_UNSUPP) {
-        mode_names[3] = "full";
+        mode_names[0] = "full";
     }
     
     // Output in order
-    for (int i = 1; i <= 5; i++) {
+    for (int i = 0; i <= 4; i++) {
         if (mode_names[i]) {
             len += scnprintf(buf + len, PAGE_SIZE - len, 
                           "%d: %s\n", i, mode_names[i]);
