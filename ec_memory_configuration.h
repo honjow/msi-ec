@@ -5,6 +5,7 @@
 #include <linux/device.h>
 
 #define MSI_EC_DRIVER_NAME "msi-ec"
+#define MSI_EC_HWMON_NAME "msi_ec"
 
 #define MSI_EC_ADDR_UNKNOWN 0xff01 // unknown address
 #define MSI_EC_ADDR_UNSUPP  0xff01 // unsupported parameter

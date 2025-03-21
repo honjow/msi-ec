@@ -4805,10 +4805,10 @@ static int msi_platform_remove(struct platform_device *pdev)
 	if (debug)
 		sysfs_remove_group(&pdev->dev.kobj, &msi_debug_group);
 	
-	// Remove fan curve attributes
-    if (hwmon_dev) {
-        remove_fan_curve_attrs(hwmon_dev);
-    }
+	// // Remove fan curve attributes
+    // if (hwmon_dev) {
+    //     remove_fan_curve_attrs(hwmon_dev);
+    // }
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0))
 	return 0;
@@ -5215,23 +5215,28 @@ cleanup:
 static void remove_fan_curve_attrs(struct device *dev)
 {
     int i;
-    
-    if (curve_attrs) {
-        for (i = 0; i < curve_attrs_count; i++) {
-            device_remove_file(dev, &curve_attrs[i].dev_attr);
-            
-            if (curve_attrs[i].dev_attr.attr.name) {
-                kfree(curve_attrs[i].dev_attr.attr.name);
-            }
-        }
-        kfree(curve_attrs);
-        curve_attrs = NULL;
-        curve_attrs_count = 0;
-		pr_debug("msi-ec: Successfully removed all fan curve attributes\n");
+
+	if (!dev) {
+        pr_err("msi-ec: Cannot remove attributes, device pointer is NULL\n");
+        return;
     }
 
-    device_remove_file(dev, &dev_attr_pwm1_auto_points_count);
-    device_remove_file(dev, &dev_attr_pwm2_auto_points_count);
+	if (!curve_attrs) {
+        pr_info("msi-ec: No fan curve attributes to remove\n");
+        return;
+    }
+    
+    pr_info("msi-ec: Removing %d fan curve attributes\n", curve_attrs_count);
+    for (i = 0; i < curve_attrs_count; i++) {
+        if (curve_attrs[i].dev_attr.attr.name) {
+            // device_remove_file(dev, &curve_attrs[i].dev_attr);
+            kfree(curve_attrs[i].dev_attr.attr.name);
+        }
+    }
+    kfree(curve_attrs);
+    curve_attrs = NULL;
+    curve_attrs_count = 0;
+	pr_info("msi-ec: Successfully removed all fan curve attributes\n");
 }
 
 // ============================================================ //
@@ -5639,19 +5644,6 @@ static int __init msi_ec_init(void)
 		led_classdev_register(&msi_platform_device->dev,
 				      &msiacpi_led_kbdlight);
 
-	// if (conf.cpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP) {
-	// 	int result = curve_init(cpu_curve_package);
-	// 	if (result < 0)
-	// 		return result;
-	// }
-
-	// if (conf.gpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP) {
-	// 	int result = curve_init(gpu_curve_package);
-	// 	if (result < 0)
-	// 		return result;
-	// }
-
-
 	pr_info("msi-ec: Registering hwmon device\n");
 
 	// register hwmon device
@@ -5660,7 +5652,7 @@ static int __init msi_ec_init(void)
 		return -ENOMEM;
 	
 	hwmon_data->dev = &msi_platform_device->dev;
-	hwmon_data->name = MSI_EC_DRIVER_NAME;
+	hwmon_data->name = MSI_EC_HWMON_NAME;
 	
 	dev_set_drvdata(&msi_platform_device->dev, hwmon_data);
 	
@@ -5705,6 +5697,11 @@ static void __exit msi_ec_exit(void)
 		if (charge_control_supported)
 			battery_hook_unregister(&battery_hook);
 	}
+
+	if (hwmon_dev) {
+        pr_info("msi-ec: Removing fan curve attributes before unregistering hwmon\n");
+        remove_fan_curve_attrs(hwmon_dev);
+    }
 
 	// unregister hwmon device
 	if (hwmon_dev)
