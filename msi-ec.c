@@ -4872,6 +4872,8 @@ static int __init load_configuration(void)
 // Hwmon functions (curve)
 // ============================================================ //
 
+static int virtual_hwmon_pwm_enable[2] = {-1, -1};
+
 // Array to hold dynamically created attributes
 static struct msi_ec_curve_attr *curve_attrs;
 static int curve_attrs_count;
@@ -5343,6 +5345,8 @@ static int msi_ec_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
         if (attr == hwmon_pwm_enable) {
             if (channel == 0 || channel == 1) { // CPU and GPU fans share mode control
                 // Change fan mode based on val
+				virtual_hwmon_pwm_enable[channel] = val;
+
                 switch (val) {
                 case 1: // Manual mode - Advanced
                     result = set_cooler_boost(false);
@@ -5350,19 +5354,26 @@ static int msi_ec_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
                         result = set_fan_mode(FM_ADVANCED_NAME);
                     else
                         return -EINVAL;
+					virtual_hwmon_pwm_enable[1] = 1;
+					virtual_hwmon_pwm_enable[0] = 1;
                     break;
                 case 2: // Automatic mode - Auto
                     result = set_cooler_boost(false);
-                    if (fan_mode_is_available(FM_AUTO_NAME))
-                        result = set_fan_mode(FM_AUTO_NAME);
-                    else
-                        return -EINVAL;
+					// If both channels are set to automatic mode, apply the change
+					if (virtual_hwmon_pwm_enable[1] == 2 && virtual_hwmon_pwm_enable[0] ==2) {
+						if (fan_mode_is_available(FM_AUTO_NAME))
+						    result = set_fan_mode(FM_AUTO_NAME);
+						else
+						    return -EINVAL;
+					}
                     break;
                 case 3: // Full speed mode - Cooler Boost
                     if (conf.cooler_boost.address != MSI_EC_ADDR_UNSUPP)
                         result = set_cooler_boost(true);
                     else
                         return -EINVAL;
+					virtual_hwmon_pwm_enable[0] = 3;
+					virtual_hwmon_pwm_enable[1] = 3;
                     break;
                 case 4: // Silent mode
                     result = set_cooler_boost(false);
@@ -5370,6 +5381,8 @@ static int msi_ec_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
                         result = set_fan_mode(FM_SILENT_NAME);
                     else
                         return -EINVAL;
+					virtual_hwmon_pwm_enable[0] = 4;
+					virtual_hwmon_pwm_enable[1] = 4;
                     break;
                 case 5: // Basic mode
                     result = set_cooler_boost(false);
@@ -5377,6 +5390,8 @@ static int msi_ec_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
                         result = set_fan_mode(FM_BASIC_NAME);
                     else
                         return -EINVAL;
+					virtual_hwmon_pwm_enable[0] = 5;
+					virtual_hwmon_pwm_enable[1] = 5;
                     break;
                 default:
                     return -EINVAL;
@@ -5491,6 +5506,11 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 		if (attr == hwmon_pwm_enable) {
 			// CPU and GPU fans share mode control, so return the same value for both channels
     		if (channel == 0 || channel == 1) {
+				if (virtual_hwmon_pwm_enable[channel] >= 0) {
+                	*val = virtual_hwmon_pwm_enable[channel];
+                	return 0;
+            	}
+
 				int result;
 				bool cooler_boost_enabled = false;
 				const char *mode_name = NULL;
@@ -5501,6 +5521,8 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 				}
     		    if (cooler_boost_enabled) {
 					*val = 3; // Full speed mode
+					virtual_hwmon_pwm_enable[1] = 3;
+					virtual_hwmon_pwm_enable[0] = 3;
 					return 0;
 				} else {
 					result = fan_mode_get(&mode_name);
@@ -5517,6 +5539,8 @@ static int msi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 						*val = 5; // Basic mode
 					else
 						*val = 0; // Unknown mode
+					virtual_hwmon_pwm_enable[1] = *val;
+					virtual_hwmon_pwm_enable[0] = *val;
 					return 0;
 				}
 			}
