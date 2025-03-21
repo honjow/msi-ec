@@ -2938,19 +2938,33 @@ static struct msi_ec_conf CONF401 __initdata = {
 	.fan_mode = {
 		.address = 0xd4,
 		.modes = {
-			{ FM_AUTO_NAME,     0x0d },
-			{ FM_SILENT_NAME,   0x1d },
-			{ FM_ADVANCED_NAME, 0x8d },
+			{ FM_AUTO_NAME,     0x00 },
+			{ FM_SILENT_NAME,   0x10 },
+			{ FM_ADVANCED_NAME, 0x80 },
 			MSI_EC_MODE_NULL
 		},
 	},
 	.cpu = {
 		.rt_temp_address       = 0x68,
 		.rt_fan_speed_address  = 0x71,
+		.fan_curve = {
+			.speed_start_address = 0x72,
+			.temperature_start_address = 0x6a,
+			.entries_count = 7,
+			.max_speed = 150,
+			.apply_strategy = CURVE_APPLY_STRATEGY_RESET_ON_AUTO
+		}
 	},
 	.gpu = {
 		.rt_temp_address      = 0x80,
 		.rt_fan_speed_address = 0x89,
+		.fan_curve = {
+			.speed_start_address = 0x8a,
+			.temperature_start_address = 0x82,
+			.entries_count = 7,
+			.max_speed = 150,
+			.apply_strategy = CURVE_APPLY_STRATEGY_RESET_ON_AUTO
+		}
 	},
 	.leds = {
 		.micmute_led_address = MSI_EC_ADDR_UNSUPP,
