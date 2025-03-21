@@ -4842,6 +4842,21 @@ static struct platform_driver msi_platform_driver = {
 // Module load/unload
 // ============================================================ //
 
+static struct dmi_system_id msi_dmi_table[] __initconst __maybe_unused = {
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "MICRO-STAR INT"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Micro-Star International"),
+		},
+	},
+	{}
+};
+MODULE_DEVICE_TABLE(dmi, msi_dmi_table);
+
 // must be called before msi_platform_probe()
 static int __init load_configuration(void)
 {
