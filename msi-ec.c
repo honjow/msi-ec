@@ -4094,10 +4094,14 @@ static int sync_ec_curve_safe(struct msi_ec_fan_curve curve, u8 *fan_speed_buf, 
 static int push_ec_curve_safe(struct msi_ec_fan_curve curve, const u8 *fan_speed_buf, const u8 *temperature_buf) {
 	const char *fan_mode;
 
+	pr_info("msi-ec: (push_ec_curve_safe) checking fan mode, apply_strategy: %d\n", curve.apply_strategy);
 	if (curve.apply_strategy == CURVE_APPLY_STRATEGY_RESET_ON_AUTO) {
 		if (fan_mode_get(&fan_mode)) return -ENODATA;
 
-		if (strcmp(fan_mode, FM_ADVANCED_NAME)) return 0;
+		if (strcmp(fan_mode, FM_ADVANCED_NAME)) {
+			pr_info("msi-ec: (push_ec_curve_safe) fan mode is [%s], not advanced, skipping\n", fan_mode);
+			return 0;
+		}
 	}
 
 	return push_ec_curve(curve, fan_speed_buf, temperature_buf);
@@ -4910,59 +4914,82 @@ static ssize_t curve_attr_show(struct device *dev,
     int is_pwm = curve_attr->is_pwm;
     u8 value;
     int ret;
-    u16 address;
+    // u16 address;
 
 	pr_debug("msi-ec: curve_attr_show - fan=%d, point=%d, is_pwm=%d\n", 
              fan, point, is_pwm);
+    // // Select proper address based on fan, point and type (PWM or temp)
+    // if (fan == 0) { // CPU fan
+    //     if (is_pwm) {
+    //         // Make sure point is within range
+    //         if (point < 1 || point > conf.cpu.fan_curve.entries_count) {
+	// 			pr_debug("msi-ec: Invalid CPU PWM point: %d, max allowed: %d\n", 
+    //                      point, conf.cpu.fan_curve.entries_count);
+	// 			return -EINVAL;
+	// 		}
+                
+    //         address = conf.cpu.fan_curve.speed_start_address + (point - 1);
+	// 		pr_debug("msi-ec: Reading CPU PWM from address: 0x%04x\n", address);
+    //     } else {
+    //         // Last point has no temperature value
+    //         if (point < 1 || point >= conf.cpu.fan_curve.entries_count) {
+	// 			pr_debug("msi-ec: Invalid CPU temperature point: %d, max allowed: %d\n", 
+    //                      point, conf.cpu.fan_curve.entries_count);
+	// 			return -EINVAL;
+	// 		}
+                
+    //         address = conf.cpu.fan_curve.temperature_start_address + (point - 1);
+    //     }
+    // } else { // GPU fan
+    //     if (is_pwm) {
+    //         if (point < 1 || point > conf.gpu.fan_curve.entries_count)
+    //             return -EINVAL;
+                
+    //         address = conf.gpu.fan_curve.speed_start_address + (point - 1);
+    //     } else {
+    //         if (point < 1 || point >= conf.gpu.fan_curve.entries_count)
+    //             return -EINVAL;
+                
+    //         address = conf.gpu.fan_curve.temperature_start_address + (point - 1);
+    //     }
+    // }
     
-    // Select proper address based on fan, point and type (PWM or temp)
-    if (fan == 0) { // CPU fan
-        if (is_pwm) {
-            // Make sure point is within range
-            if (point < 1 || point > conf.cpu.fan_curve.entries_count) {
-				pr_debug("msi-ec: Invalid CPU PWM point: %d, max allowed: %d\n", 
-                         point, conf.cpu.fan_curve.entries_count);
-				return -EINVAL;
-			}
-                
-            address = conf.cpu.fan_curve.speed_start_address + (point - 1);
-			pr_debug("msi-ec: Reading CPU PWM from address: 0x%04x\n", address);
-        } else {
-            // Last point has no temperature value
-            if (point < 1 || point >= conf.cpu.fan_curve.entries_count) {
-				pr_debug("msi-ec: Invalid CPU temperature point: %d, max allowed: %d\n", 
-                         point, conf.cpu.fan_curve.entries_count);
-				return -EINVAL;
-			}
-                
-            address = conf.cpu.fan_curve.temperature_start_address + (point - 1);
-        }
-    } else { // GPU fan
-        if (is_pwm) {
-            if (point < 1 || point > conf.gpu.fan_curve.entries_count)
-                return -EINVAL;
-                
-            address = conf.gpu.fan_curve.speed_start_address + (point - 1);
-        } else {
-            if (point < 1 || point >= conf.gpu.fan_curve.entries_count)
-                return -EINVAL;
-                
-            address = conf.gpu.fan_curve.temperature_start_address + (point - 1);
-        }
-    }
-    
-    // Read value from EC
-    ret = ec_read(address, &value);
-    if (ret < 0) {
-		pr_debug("msi-ec: Failed to read EC value from address: 0x%04x\n", address);
-		return ret;
+    // // Read value from EC
+    // ret = ec_read(address, &value);
+    // if (ret < 0) {
+	// 	pr_debug("msi-ec: Failed to read EC value from address: 0x%04x\n", address);
+	// 	return ret;
+	// }
+
+	struct curve_pack *curve_data = (fan == 0) ? &cpu_curve_package : &gpu_curve_package;
+	struct msi_ec_fan_curve *conf_curve = (fan == 0) ? &conf.cpu.fan_curve : &conf.gpu.fan_curve;
+
+	if (is_pwm) {
+		if (point < 1 || point > conf_curve->entries_count) {
+			pr_err("msi-ec: Invalid PWM point: %d, max allowed: %d\n", 
+					 point, conf_curve->entries_count);
+			return -EINVAL;
+		}
+
+		value = curve_data->curve_fan_speed[point - 1];
+		unsigned int orig_val = value;
+		value = value * 255 / 100;
+		pr_debug("msi-ec: Reading PWM from buffer, index: %d, scaled value: %u (from %u)\n", 
+                 point - 1, value, orig_val);
+	} else {
+		if (point < 1 || point >= conf_curve->entries_count) {
+			pr_err("msi-ec: Invalid temperature point: %d, max allowed: %d\n", 
+					 point, conf_curve->entries_count);
+			return -EINVAL;
+		}
+
+		value = curve_data->curve_temp[point - 1];
+		pr_debug("msi-ec: Reading temperature from buffer, index: %d, value: %u\n", 
+                 point - 1, value);
 	}
 
-	unsigned int orig_val = value;
-	value = value * 255 / 100;
-
-	pr_debug("msi-ec: Reading PWM from address: 0x%04x, scaled value: %u (from %u)\n", 
-			 address, value, orig_val);
+	// pr_debug("msi-ec: Reading PWM from address: 0x%04x, scaled value: %u (from %u)\n", 
+	// 		 address, value, orig_val);
     return sysfs_emit(buf, "%u\n", value);
 }
 
@@ -4980,13 +5007,18 @@ static ssize_t curve_attr_store(struct device *dev,
     int ret;
     u16 address;
 
-	pr_debug("msi-ec: curve_attr_store - fan=%d, point=%d, is_pwm=%d\n", 
+	pr_info("msi-ec: (curve_attr_store) fan=%d, point=%d, is_pwm=%d\n", 
              fan, point, is_pwm);
+
+	struct curve_pack *curve_data = (fan == 0) ? &cpu_curve_package : &gpu_curve_package;
+	struct msi_ec_fan_curve *curve = curve_data->curve;
+	u8 *fan_speed_buf = curve_data->curve_fan_speed;
+	u8 *temp_buf = curve_data->curve_temp;
     
     // Parse value from user
     ret = kstrtoul(buf, 10, &val);
     if (ret < 0) {
-		pr_debug("msi-ec: Failed to parse value from user\n");
+		pr_err("msi-ec: Failed to parse value from user\n");
 		return ret;
 	}
     
@@ -5006,10 +5038,14 @@ static ssize_t curve_attr_store(struct device *dev,
 
 			unsigned long orig_val = val;
 			val = val * 100 / 255;
+
+			fan_speed_buf[point - 1] = (u8)val;
+			pr_info("msi-ec: Updating CPU PWM in buffer, index: %d, scaled value: %lu (from %lu)\n", 
+                     point - 1, val, orig_val);
             
-            address = conf.cpu.fan_curve.speed_start_address + (point - 1);
-			pr_debug("msi-ec: Writing CPU PWM to address: 0x%04x, scaled value: %lu (from %lu)\n", 
-				address, val, orig_val);
+            // address = conf.cpu.fan_curve.speed_start_address + (point - 1);
+			// pr_debug("msi-ec: Writing CPU PWM to address: 0x%04x, scaled value: %lu (from %lu)\n", 
+			// 	address, val, orig_val);
         } else {
             // Last point has no temperature value
             if (point < 1 || point >= conf.cpu.fan_curve.entries_count) {
@@ -5021,9 +5057,13 @@ static ssize_t curve_attr_store(struct device *dev,
             // Validate temperature value (0-100°C)
             if (val > 100)
                 return -EINVAL;
+
+			temp_buf[point - 1] = (u8)val;
+			pr_info("msi-ec: Updating CPU temperature in buffer, index: %d, value: %lu\n", 
+                     point - 1, val);
                 
-            address = conf.cpu.fan_curve.temperature_start_address + (point - 1);
-			pr_debug("msi-ec: Writing CPU temperature to address: 0x%04x, value: %lu\n", address, val);
+            // address = conf.cpu.fan_curve.temperature_start_address + (point - 1);
+			// pr_debug("msi-ec: Writing CPU temperature to address: 0x%04x, value: %lu\n", address, val);
         }
     } else { // GPU fan
         // Similar validation for GPU fan...
@@ -5036,28 +5076,43 @@ static ssize_t curve_attr_store(struct device *dev,
 			
 			unsigned long orig_val = val;
 			val = val * 100 / 255;
+
+			fan_speed_buf[point - 1] = (u8)val;
+			pr_debug("msi-ec: Updating GPU PWM in buffer, index: %d, scaled value: %lu (from %lu)\n", 
+			         point - 1, val, orig_val);
                 
-            address = conf.gpu.fan_curve.speed_start_address + (point - 1);
-			pr_debug("msi-ec: Writing GPU PWM to address: 0x%04x, scaled value: %lu (from %lu)\n", 
-					address, val, orig_val);
+            // address = conf.gpu.fan_curve.speed_start_address + (point - 1);
+			// pr_debug("msi-ec: Writing GPU PWM to address: 0x%04x, scaled value: %lu (from %lu)\n", 
+			// 		address, val, orig_val);
         } else {
             if (point < 1 || point >= conf.gpu.fan_curve.entries_count)
                 return -EINVAL;
                 
             if (val > 100)
                 return -EINVAL;
+
+			temp_buf[point - 1] = (u8)val;
+			pr_debug("msi-ec: Updating GPU temperature in buffer, index: %d, value: %lu\n", 
+                     point - 1, val);
                 
-            address = conf.gpu.fan_curve.temperature_start_address + (point - 1);
-			pr_debug("msi-ec: Writing GPU temperature to address: 0x%04x, value: %lu\n", address, val);
+            // address = conf.gpu.fan_curve.temperature_start_address + (point - 1);
+			// pr_debug("msi-ec: Writing GPU temperature to address: 0x%04x, value: %lu\n", address, val);
         }
     }
     
-    // Write value to EC
-    ret = ec_write(address, val);
+    // // Write value to EC
+    // ret = ec_write(address, val);
+    // if (ret < 0) {
+	// 	pr_debug("msi-ec: Failed to write EC value to address: 0x%04x\n", address);
+	// 	return ret;
+	// }
+
+	// Push curve to EC safely
+	ret = push_ec_curve_safe(*curve, fan_speed_buf, temp_buf);
     if (ret < 0) {
-		pr_debug("msi-ec: Failed to write EC value to address: 0x%04x\n", address);
-		return ret;
-	}
+        pr_err("msi-ec: Failed to push curve to EC, error: %d\n", ret);
+        return ret;
+    }
     
     return count;
 }
