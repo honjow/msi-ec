@@ -81,6 +81,8 @@ struct msi_ec_fan_curve {
 
 	// Defaults to CURVE_APPLY_STRATEGY_NORMAL
 	int apply_strategy;
+
+	int max_speed;
 };
 
 struct msi_ec_cpu_conf {
