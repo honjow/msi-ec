@@ -3294,6 +3294,10 @@ static struct msi_ec_conf conf; // current configuration
 
 static bool charge_control_supported = false;
 
+static bool fan_mode_is_available(const char *mode);
+static int create_fan_curve_attrs(struct device *dev);
+static void remove_fan_curve_attrs(struct device *dev);
+
 static char *firmware = NULL;
 module_param(firmware, charp, 0);
 MODULE_PARM_DESC(firmware, "Load a configuration for a specified firmware version");
@@ -4195,6 +4199,18 @@ static int curve_init(struct curve_pack curve_data) {
 
 		if (status < 0) return status;
 
+		pr_info("msi-ec: Initialized curve with %d entries (addr: speed=%d, temp=%d)\n", 
+                curve_data.curve->entries_count,
+                curve_data.curve->speed_start_address,
+                curve_data.curve->temperature_start_address);
+
+        for (int i = 0; i < curve_data.curve->entries_count; i++) {
+            pr_info("msi-ec:   Point %d: Fan speed = %d%%, Temp = %d°C\n", 
+                    i + 1, 
+                    curve_data.curve_fan_speed_default[i],
+                    i < curve_data.curve->entries_count - 1 ? curve_data.curve_temp_default[i] : 0);
+        }
+
 		for (int i = 0; i < CURVE_MAX_ENTRIES; i++) {
 			curve_data.curve_fan_speed[i] = curve_data.curve_fan_speed_default[i];
 			curve_data.curve_temp[i] = curve_data.curve_temp_default[i];
@@ -4206,6 +4222,17 @@ static int curve_init(struct curve_pack curve_data) {
 
 static int curve_destroy(struct curve_pack curve_data) {
 	if (is_curve_allowed(*curve_data.curve)) {
+		pr_info("msi-ec: Destroying curve with %d entries (addr: speed=%d, temp=%d)\n", 
+                curve_data.curve->entries_count,
+                curve_data.curve->speed_start_address,
+                curve_data.curve->temperature_start_address);
+        
+        for (int i = 0; i < curve_data.curve->entries_count; i++) {
+            pr_info("msi-ec:   Point %d: Fan speed = %d%%, Temp = %d°C\n", 
+                    i + 1, 
+                    curve_data.curve_fan_speed_default[i],
+                    i < curve_data.curve->entries_count - 1 ? curve_data.curve_temp_default[i] : 0);
+        }
 		int status = push_ec_curve(*curve_data.curve,
 			curve_data.curve_fan_speed_default, curve_data.curve_temp_default);
 
@@ -4760,6 +4787,12 @@ static int __init msi_platform_probe(struct platform_device *pdev)
 			return result;
 	}
 
+	status = curve_init(cpu_curve_package);
+	if (status < 0) return status;
+
+	status = curve_init(gpu_curve_package);
+	if (status < 0) return status;
+
 	return 0;
 }
 
@@ -4771,6 +4804,11 @@ static int msi_platform_remove(struct platform_device *pdev)
 {
 	if (debug)
 		sysfs_remove_group(&pdev->dev.kobj, &msi_debug_group);
+	
+	// Remove fan curve attributes
+    if (hwmon_dev) {
+        remove_fan_curve_attrs(hwmon_dev);
+    }
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0))
 	return 0;
@@ -4832,13 +4870,373 @@ static int __init load_configuration(void)
 }
 
 // ============================================================ //
-// Hwmon functions
+// Hwmon functions (curve)
 // ============================================================ //
 
 static ssize_t pwm_enable_available_show(struct device *dev, struct device_attribute *attr, char *buf);
 
 static DEVICE_ATTR_RO(pwm_enable_available);
 
+// Array to hold dynamically created attributes
+static struct msi_ec_curve_attr *curve_attrs;
+static int curve_attrs_count;
+
+// Forward declarations
+static ssize_t curve_attr_show(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t curve_attr_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
+
+// Fan curve points count attributes
+static ssize_t pwm1_auto_points_count_show(struct device *dev, 
+                                         struct device_attribute *attr,
+                                         char *buf)
+{
+    return sysfs_emit(buf, "%d\n", conf.cpu.fan_curve.entries_count);
+}
+
+static ssize_t pwm2_auto_points_count_show(struct device *dev, 
+                                         struct device_attribute *attr,
+                                         char *buf)
+{
+    return sysfs_emit(buf, "%d\n", conf.gpu.fan_curve.entries_count);
+}
+
+static DEVICE_ATTR_RO(pwm1_auto_points_count);
+static DEVICE_ATTR_RO(pwm2_auto_points_count);
+
+// Common show function for all curve point attributes
+static ssize_t curve_attr_show(struct device *dev, 
+                              struct device_attribute *attr,
+                              char *buf)
+{
+    struct msi_ec_curve_attr *curve_attr = 
+        container_of(attr, struct msi_ec_curve_attr, dev_attr);
+    int fan = curve_attr->fan;
+    int point = curve_attr->point;
+    int is_pwm = curve_attr->is_pwm;
+    u8 value;
+    int ret;
+    u16 address;
+
+	pr_debug("msi-ec: curve_attr_show - fan=%d, point=%d, is_pwm=%d\n", 
+             fan, point, is_pwm);
+    
+    // Select proper address based on fan, point and type (PWM or temp)
+    if (fan == 0) { // CPU fan
+        if (is_pwm) {
+            // Make sure point is within range
+            if (point < 1 || point > conf.cpu.fan_curve.entries_count) {
+				pr_debug("msi-ec: Invalid CPU PWM point: %d, max allowed: %d\n", 
+                         point, conf.cpu.fan_curve.entries_count);
+				return -EINVAL;
+			}
+                
+            address = conf.cpu.fan_curve.speed_start_address + (point - 1);
+			pr_debug("msi-ec: Reading CPU PWM from address: 0x%04x\n", address);
+        } else {
+            // Last point has no temperature value
+            if (point < 1 || point >= conf.cpu.fan_curve.entries_count) {
+				pr_debug("msi-ec: Invalid CPU temperature point: %d, max allowed: %d\n", 
+                         point, conf.cpu.fan_curve.entries_count);
+				return -EINVAL;
+			}
+                
+            address = conf.cpu.fan_curve.temperature_start_address + (point - 1);
+        }
+    } else { // GPU fan
+        if (is_pwm) {
+            if (point < 1 || point > conf.gpu.fan_curve.entries_count)
+                return -EINVAL;
+                
+            address = conf.gpu.fan_curve.speed_start_address + (point - 1);
+        } else {
+            if (point < 1 || point >= conf.gpu.fan_curve.entries_count)
+                return -EINVAL;
+                
+            address = conf.gpu.fan_curve.temperature_start_address + (point - 1);
+        }
+    }
+    
+    // Read value from EC
+    ret = ec_read(address, &value);
+    if (ret < 0) {
+		pr_debug("msi-ec: Failed to read EC value from address: 0x%04x\n", address);
+		return ret;
+	}
+	pr_debug("msi-ec: Read EC value from address: 0x%04x, value: %u\n", address, value);
+    
+    return sysfs_emit(buf, "%u\n", value);
+}
+
+// Common store function for all curve point attributes
+static ssize_t curve_attr_store(struct device *dev,
+                               struct device_attribute *attr,
+                               const char *buf, size_t count)
+{
+    struct msi_ec_curve_attr *curve_attr = 
+        container_of(attr, struct msi_ec_curve_attr, dev_attr);
+    int fan = curve_attr->fan;
+    int point = curve_attr->point;
+    int is_pwm = curve_attr->is_pwm;
+    unsigned long val;
+    int ret;
+    u16 address;
+
+	pr_debug("msi-ec: curve_attr_store - fan=%d, point=%d, is_pwm=%d\n", 
+             fan, point, is_pwm);
+    
+    // Parse value from user
+    ret = kstrtoul(buf, 10, &val);
+    if (ret < 0) {
+		pr_debug("msi-ec: Failed to parse value from user\n");
+		return ret;
+	}
+    
+    // Select proper address based on fan, point and type (PWM or temp)
+    if (fan == 0) { // CPU fan
+        if (is_pwm) {
+            // Make sure point is within range
+            if (point < 1 || point > conf.cpu.fan_curve.entries_count) {
+				pr_debug("msi-ec: Invalid CPU PWM point: %d, max allowed: %d\n", 
+				         point, conf.cpu.fan_curve.entries_count);
+				return -EINVAL;
+			}
+                
+            // Validate PWM value (0-255)
+            if (val > 255)
+                return -EINVAL;
+            
+            address = conf.cpu.fan_curve.speed_start_address + (point - 1);
+			pr_debug("msi-ec: Writing CPU PWM to address: 0x%04x, value: %lu\n", address, val);
+        } else {
+            // Last point has no temperature value
+            if (point < 1 || point >= conf.cpu.fan_curve.entries_count) {
+				pr_debug("msi-ec: Invalid CPU temperature point: %d, max allowed: %d\n", 
+						 point, conf.cpu.fan_curve.entries_count);
+				return -EINVAL;
+			}
+                
+            // Validate temperature value (0-100°C)
+            if (val > 100)
+                return -EINVAL;
+                
+            address = conf.cpu.fan_curve.temperature_start_address + (point - 1);
+			pr_debug("msi-ec: Writing CPU temperature to address: 0x%04x, value: %lu\n", address, val);
+        }
+    } else { // GPU fan
+        // Similar validation for GPU fan...
+        if (is_pwm) {
+            if (point < 1 || point > conf.gpu.fan_curve.entries_count)
+                return -EINVAL;
+                
+            if (val > 255)
+                return -EINVAL;
+                
+            address = conf.gpu.fan_curve.speed_start_address + (point - 1);
+        } else {
+            if (point < 1 || point >= conf.gpu.fan_curve.entries_count)
+                return -EINVAL;
+                
+            if (val > 100)
+                return -EINVAL;
+                
+            address = conf.gpu.fan_curve.temperature_start_address + (point - 1);
+        }
+    }
+    
+    // Write value to EC
+    ret = ec_write(address, val);
+    if (ret < 0) {
+		pr_debug("msi-ec: Failed to write EC value to address: 0x%04x\n", address);
+		return ret;
+	}
+    
+    return count;
+}
+
+// Create fan curve attributes based on configuration
+static int create_fan_curve_attrs(struct device *dev)
+{
+    int i, idx = 0;
+    int cpu_points = conf.cpu.fan_curve.entries_count;
+    int gpu_points = conf.gpu.fan_curve.entries_count;
+    char name[32];
+    int ret;
+
+	pr_debug("msi-ec: create_fan_curve_attrs - CPU points: %d, GPU points: %d\n", 
+			 cpu_points, gpu_points);
+    
+    // Calculate total number of attributes to create
+    // CPU: PWM for all points + temp for all except last + points count
+    // GPU: Same structure
+    curve_attrs_count = cpu_points + (cpu_points - 1) + 
+                       gpu_points + (gpu_points - 1) + 2;
+    
+    // Allocate memory for attributes
+    curve_attrs = kzalloc(sizeof(*curve_attrs) * curve_attrs_count, GFP_KERNEL);
+    if (!curve_attrs) {
+		pr_debug("msi-ec: Failed to allocate memory for curve attributes\n");
+		return -ENOMEM;
+	}
+	
+    // Create attributes for CPU fan curve points
+    for (i = 1; i <= cpu_points; i++) {
+        // PWM attributes
+        snprintf(name, sizeof(name), "pwm1_auto_point%d_pwm", i);
+        
+        curve_attrs[idx].fan = 0;  // CPU
+        curve_attrs[idx].point = i;
+        curve_attrs[idx].is_pwm = 1;
+        
+        curve_attrs[idx].dev_attr.attr.name = 
+            kstrdup(name, GFP_KERNEL);
+        if (!curve_attrs[idx].dev_attr.attr.name) {
+            ret = -ENOMEM;
+            goto cleanup;
+        }
+        
+        curve_attrs[idx].dev_attr.attr.mode = 0644;
+        curve_attrs[idx].dev_attr.show = curve_attr_show;
+        curve_attrs[idx].dev_attr.store = curve_attr_store;
+        
+        ret = device_create_file(dev, &curve_attrs[idx].dev_attr);
+        if (ret < 0)
+            goto cleanup;
+            
+        idx++;
+        
+        // Temperature attributes (except for last point)
+        if (i < cpu_points) {
+            snprintf(name, sizeof(name), "pwm1_auto_point%d_temp", i);
+            
+            curve_attrs[idx].fan = 0;  // CPU
+            curve_attrs[idx].point = i;
+            curve_attrs[idx].is_pwm = 0;
+            
+            curve_attrs[idx].dev_attr.attr.name = 
+                kstrdup(name, GFP_KERNEL);
+            if (!curve_attrs[idx].dev_attr.attr.name) {
+                ret = -ENOMEM;
+                goto cleanup;
+            }
+            
+            curve_attrs[idx].dev_attr.attr.mode = 0644;
+            curve_attrs[idx].dev_attr.show = curve_attr_show;
+            curve_attrs[idx].dev_attr.store = curve_attr_store;
+            
+            ret = device_create_file(dev, &curve_attrs[idx].dev_attr);
+            if (ret < 0)
+                goto cleanup;
+                
+            idx++;
+        }
+    }
+    
+    // Similarly create attributes for GPU fan curve points
+    for (i = 1; i <= gpu_points; i++) {
+        // PWM attributes
+        snprintf(name, sizeof(name), "pwm2_auto_point%d_pwm", i);
+        
+        curve_attrs[idx].fan = 1;  // GPU
+        curve_attrs[idx].point = i;
+        curve_attrs[idx].is_pwm = 1;
+        
+        curve_attrs[idx].dev_attr.attr.name = 
+            kstrdup(name, GFP_KERNEL);
+        if (!curve_attrs[idx].dev_attr.attr.name) {
+            ret = -ENOMEM;
+            goto cleanup;
+        }
+        
+        curve_attrs[idx].dev_attr.attr.mode = 0644;
+        curve_attrs[idx].dev_attr.show = curve_attr_show;
+        curve_attrs[idx].dev_attr.store = curve_attr_store;
+        
+        ret = device_create_file(dev, &curve_attrs[idx].dev_attr);
+        if (ret < 0)
+            goto cleanup;
+            
+        idx++;
+        
+        // Temperature attributes (except for last point)
+        if (i < gpu_points) {
+            snprintf(name, sizeof(name), "pwm2_auto_point%d_temp", i);
+            
+            curve_attrs[idx].fan = 1;  // GPU
+            curve_attrs[idx].point = i;
+            curve_attrs[idx].is_pwm = 0;
+            
+            curve_attrs[idx].dev_attr.attr.name = 
+                kstrdup(name, GFP_KERNEL);
+            if (!curve_attrs[idx].dev_attr.attr.name) {
+                ret = -ENOMEM;
+                goto cleanup;
+            }
+            
+            curve_attrs[idx].dev_attr.attr.mode = 0644;
+            curve_attrs[idx].dev_attr.show = curve_attr_show;
+            curve_attrs[idx].dev_attr.store = curve_attr_store;
+            
+            ret = device_create_file(dev, &curve_attrs[idx].dev_attr);
+            if (ret < 0)
+                goto cleanup;
+                
+            idx++;
+        }
+    }
+    
+    // Create points count attributes
+    ret = device_create_file(dev, &dev_attr_pwm1_auto_points_count);
+    if (ret < 0)
+        goto cleanup;
+        
+    ret = device_create_file(dev, &dev_attr_pwm2_auto_points_count);
+    if (ret < 0) {
+        device_remove_file(dev, &dev_attr_pwm1_auto_points_count);
+        goto cleanup;
+    }
+    
+    return 0;
+    
+cleanup:
+    // Remove already created attributes
+    for (i = 0; i < idx; i++) {
+		if (curve_attrs[i].dev_attr.attr.name) {
+			kfree(curve_attrs[i].dev_attr.attr.name);
+			device_remove_file(dev, &curve_attrs[i].dev_attr);
+		}
+    }
+    kfree(curve_attrs);
+    curve_attrs = NULL;
+	curve_attrs_count = 0;
+    return ret;
+}
+
+// Remove dynamically created attributes
+static void remove_fan_curve_attrs(struct device *dev)
+{
+    int i;
+    
+    if (curve_attrs) {
+        for (i = 0; i < curve_attrs_count; i++) {
+            device_remove_file(dev, &curve_attrs[i].dev_attr);
+            
+            if (curve_attrs[i].dev_attr.attr.name) {
+                kfree(curve_attrs[i].dev_attr.attr.name);
+            }
+        }
+        kfree(curve_attrs);
+        curve_attrs = NULL;
+        curve_attrs_count = 0;
+		pr_debug("msi-ec: Successfully removed all fan curve attributes\n");
+    }
+
+    device_remove_file(dev, &dev_attr_pwm1_auto_points_count);
+    device_remove_file(dev, &dev_attr_pwm2_auto_points_count);
+}
+
+// ============================================================ //
+// Hwmon functions (other)
+// ============================================================ //
 // Check if a specific fan mode is available in the configuration
 static bool fan_mode_is_available(const char *mode)
 {
@@ -5241,6 +5639,19 @@ static int __init msi_ec_init(void)
 		led_classdev_register(&msi_platform_device->dev,
 				      &msiacpi_led_kbdlight);
 
+	// if (conf.cpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP) {
+	// 	int result = curve_init(cpu_curve_package);
+	// 	if (result < 0)
+	// 		return result;
+	// }
+
+	// if (conf.gpu.rt_fan_speed_address != MSI_EC_ADDR_UNSUPP) {
+	// 	int result = curve_init(gpu_curve_package);
+	// 	if (result < 0)
+	// 		return result;
+	// }
+
+
 	pr_info("msi-ec: Registering hwmon device\n");
 
 	// register hwmon device
@@ -5263,6 +5674,16 @@ static int __init msi_ec_init(void)
 		pr_err("msi-ec: hwmon device register failed with error %d\n", err);
 		return err;
 	}
+
+	// Add fan curve attributes if advanced mode is available
+	if (!IS_ERR(hwmon_dev) && fan_mode_is_available(FM_ADVANCED_NAME)) {
+		int result = create_fan_curve_attrs(hwmon_dev);
+		if (result < 0) {
+			hwmon_device_unregister(hwmon_dev);
+			return result;
+		}
+	}
+
 	pr_info("msi-ec: hwmon device registered successfully\n");
 
 	return 0;

@@ -2,6 +2,7 @@
 #define __MSI_EC_REGISTERS_CONFIG__
 
 #include <linux/types.h>
+#include <linux/device.h>
 
 #define MSI_EC_DRIVER_NAME "msi-ec"
 
@@ -124,6 +125,14 @@ struct msi_ec_conf {
 	struct msi_ec_gpu_conf            gpu;
 	struct msi_ec_led_conf            leds;
 	struct msi_ec_kbd_bl_conf         kbd_bl;
+};
+
+// Struct to hold curve point attribute information
+struct msi_ec_curve_attr {
+    struct device_attribute dev_attr;
+    int fan;        // Fan index (0=CPU, 1=GPU)
+    int point;      // Curve point index (1-based)
+    int is_pwm;     // 1=PWM, 0=temperature
 };
 
 #endif // __MSI_EC_REGISTERS_CONFIG__
